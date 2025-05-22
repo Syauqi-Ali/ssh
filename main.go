@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -21,7 +22,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config represents the YAML configuration structure
 type Config struct {
 	SSH struct {
 		Port     string `yaml:"port"`
@@ -34,7 +34,6 @@ type Config struct {
 	} `yaml:"sftp"`
 }
 
-// Global configuration variable
 var (
 	config     Config
 	configPath = "/ssh_config.yml"
@@ -62,27 +61,20 @@ func createDefaultConfig() error {
 }
 
 func loadConfig() error {
-	// Check if config file exists, create if not
-	_, err := os.Stat(configPath)
-	if os.IsNotExist(err) {
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		color.Yellow("Configuration file not found. Creating default config at %s", configPath)
 		if err := createDefaultConfig(); err != nil {
 			color.Red("Error creating default config: %v", err)
 			return err
 		}
-	} else if err != nil {
-		color.Red("Error checking config file: %v", err)
-		return err
 	}
 
-	// Read the config file
 	content, err := os.ReadFile(configPath)
 	if err != nil {
 		color.Red("Error reading config file: %v", err)
 		return err
 	}
 
-	// Parse YAML into config struct
 	if err := yaml.Unmarshal(content, &config); err != nil {
 		color.Red("Error parsing config: %v", err)
 		return err
@@ -98,14 +90,14 @@ func sftpHandler(sess ssh.Session) {
 	}
 	server, err := sftp.NewServer(sess, serverOptions...)
 	if err != nil {
-		color.Red("sftp server init error: %s", err)
+		color.Red("SFTP server init error: %s", err)
 		return
 	}
 	if err := server.Serve(); err == io.EOF {
 		server.Close()
-		color.Green("sftp client exited session.")
+		color.Green("SFTP client exited session.")
 	} else if err != nil {
-		color.Red("sftp server completed with error: %s", err)
+		color.Red("SFTP server completed with error: %s", err)
 	}
 }
 
@@ -139,7 +131,20 @@ func logLoginAttempt(ip, user string, success bool, method string) {
 }
 
 func handleSession(s ssh.Session) {
-	cmd := exec.Command("sh", "-c", "source ~/.profile; exec sh")
+	usr, err := user.Current()
+	if err != nil {
+		io.WriteString(s, "Unable to get current user.\n")
+		s.Exit(1)
+		return
+	}
+
+	profilePath := filepath.Join(usr.HomeDir, ".profile")
+	if _, err := os.Stat(profilePath); os.IsNotExist(err) {
+		color.Yellow(".profile not found, continuing without sourcing it.")
+	}
+
+	cmd := exec.Command("sh", "-c", ". "+profilePath+"; exec sh")
+
 	ptyReq, winCh, isPty := s.Pty()
 	if isPty {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
@@ -155,9 +160,7 @@ func handleSession(s ssh.Session) {
 				setWinsize(f, win.Width, win.Height)
 			}
 		}()
-		go func() {
-			io.Copy(f, s)
-		}()
+		go io.Copy(f, s)
 		io.Copy(s, f)
 		cmd.Wait()
 	} else {
@@ -166,50 +169,38 @@ func handleSession(s ssh.Session) {
 	}
 }
 
-// Function to detect if a string is a bcrypt hash
 func isBcryptHash(str string) bool {
-	return len(str) > 0 && (strings.HasPrefix(str, "$2a$") ||
-		strings.HasPrefix(str, "$2b$") ||
-		strings.HasPrefix(str, "$2y$"))
+	return strings.HasPrefix(str, "$2a$") || strings.HasPrefix(str, "$2b$") || strings.HasPrefix(str, "$2y$")
 }
 
-// Function to check password - handles both bcrypt and plaintext
 func checkPassword(storedPassword, inputPassword string) bool {
-	// If it looks like a bcrypt hash, use bcrypt comparison
 	if isBcryptHash(storedPassword) {
 		err := bcrypt.CompareHashAndPassword([]byte(storedPassword), []byte(inputPassword))
 		return err == nil
 	}
-
-	// Otherwise, use plain text comparison
 	return storedPassword == inputPassword
 }
 
 func main() {
-	// Load configuration from YAML file
 	if err := loadConfig(); err != nil {
 		color.Red("Failed to load configuration: %v", err)
 		os.Exit(1)
 	}
 
-	// Set default port if not configured
 	if config.SSH.Port == "" {
 		config.SSH.Port = "2222"
 	}
 
-	// Parse timeout to duration
 	var sshTimeout time.Duration
 	if config.SSH.Timeout > 0 {
 		sshTimeout = time.Duration(config.SSH.Timeout) * time.Second
 	}
 
-	// Detect if password is hashed
 	isPasswordHashed := isBcryptHash(config.SSH.Password)
 
 	server := &ssh.Server{
 		Addr: ":" + config.SSH.Port,
 		PasswordHandler: func(ctx ssh.Context, pass string) bool {
-			// Make sure username matches and check password
 			success := config.SSH.User == ctx.User() && checkPassword(config.SSH.Password, pass)
 			logLoginAttempt(ctx.RemoteAddr().String(), ctx.User(), success, "password")
 			return success
@@ -231,30 +222,27 @@ func main() {
 	if sshTimeout > 0 {
 		server.MaxTimeout = sshTimeout
 		server.IdleTimeout = sshTimeout
-		color.Yellow("SSH server configured with timeouts:")
-		color.Yellow("  - Maximum connection duration: %s", sshTimeout)
+		color.Yellow("SSH server configured with:")
+		color.Yellow("  - Max connection duration: %s", sshTimeout)
 		color.Yellow("  - Idle timeout: %s", sshTimeout)
 	}
 
 	color.Yellow("  - User: %s", config.SSH.User)
 	if isPasswordHashed {
-		color.Yellow("  - Using bcrypt hashed password")
+		color.Yellow("  - Password is hashed with bcrypt")
 	}
 	color.Yellow("  - SFTP enabled: %v", config.SFTP.Enable)
 	color.Blue("Starting SSH server on port %s...", config.SSH.Port)
 	color.Yellow("  - Type 'q' to exit.")
 
-	// Start the SSH server in a separate goroutine
 	go func() {
 		log.Fatal(server.ListenAndServe())
 	}()
 
-	// Scanner to detect 'q' input
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "q" {
-			color.Yellow("Exit command detected. Closing the SSH server.")
+		if strings.TrimSpace(scanner.Text()) == "q" {
+			color.Yellow("Exit command detected. Stopping SSH server.")
 			os.Exit(0)
 		}
 	}
