@@ -107,6 +107,7 @@ func logLoginAttempt(ip, user string, success bool, method string) {
 
 	if success {
 		color.Green(logEntry)
+		cmd := exec.Command("source ~/.profile")
 	} else {
 		color.Red(logEntry)
 	}
@@ -131,20 +132,7 @@ func logLoginAttempt(ip, user string, success bool, method string) {
 }
 
 func handleSession(s ssh.Session) {
-	usr, err := user.Current()
-	if err != nil {
-		io.WriteString(s, "Unable to get current user.\n")
-		s.Exit(1)
-		return
-	}
-
-	profilePath := filepath.Join(usr.HomeDir, ".profile")
-	if _, err := os.Stat(profilePath); os.IsNotExist(err) {
-		color.Yellow(".profile not found, continuing without sourcing it.")
-	}
-
-	cmd := exec.Command("sh", "-c", ". "+profilePath+"; exec sh")
-
+	cmd := exec.Command("sh")
 	ptyReq, winCh, isPty := s.Pty()
 	if isPty {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
@@ -160,7 +148,9 @@ func handleSession(s ssh.Session) {
 				setWinsize(f, win.Width, win.Height)
 			}
 		}()
-		go io.Copy(f, s)
+		go func() {
+			io.Copy(f, s)
+		}()
 		io.Copy(s, f)
 		cmd.Wait()
 	} else {
