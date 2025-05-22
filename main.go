@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -107,7 +106,6 @@ func logLoginAttempt(ip, user string, success bool, method string) {
 
 	if success {
 		color.Green(logEntry)
-		cmd := exec.Command("source ~/.profile")
 	} else {
 		color.Red(logEntry)
 	}
@@ -133,6 +131,7 @@ func logLoginAttempt(ip, user string, success bool, method string) {
 
 func handleSession(s ssh.Session) {
 	cmd := exec.Command("sh")
+	cmd.Env = append(os.Environ(), "PATH=/root/.cargo/bin:"+os.Getenv("PATH"))
 	ptyReq, winCh, isPty := s.Pty()
 	if isPty {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
