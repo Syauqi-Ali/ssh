@@ -139,7 +139,7 @@ func logLoginAttempt(ip, user string, success bool, method string) {
 }
 
 func handleSession(s ssh.Session) {
-	cmd := exec.Command("sh")
+	cmd := exec.Command("sh", "-c", "source ~/.profile; exec sh")
 	ptyReq, winCh, isPty := s.Pty()
 	if isPty {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
